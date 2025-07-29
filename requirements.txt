@@ -1,0 +1,11 @@
+streamlit 
+pandas 
+matplotlib 
+google-generativeai 
+python-dotenv 
+IPython 
+reportlab 
+plotly 
+numpy 
+markdown2 
+graphviz
