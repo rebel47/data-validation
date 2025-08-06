@@ -1,95 +1,49 @@
 import streamlit as st
-import os
 import pandas as pd
-import matplotlib.pyplot as plt
-import io
 import google.generativeai as genai
 from dotenv import load_dotenv
 import json
-from IPython.display import display, Markdown, JSON
 import re
 from collections import defaultdict
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, letter
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, PageBreak
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.lib.enums import TA_LEFT
-import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
-import base64
-from matplotlib.backends.backend_agg import FigureCanvasAgg
-from typing import List, Dict, Any, Optional, Union
 import numpy as np
-import tempfile
-import uuid
-import markdown2
-import plotly.graph_objects as go
-import graphviz
-
-
+import os
 
 # Load environment variables
 load_dotenv(".env")
 
 # Initialize Gemini client
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-2.5-pro')
+model = genai.GenerativeModel('gemini-2.5-flash')
+
+# Configuration
+CONFIG = {
+    'CURRENT_USER': "Ayaz",
+    'ALLOWED_DATA_TYPES': ['string', 'integer', 'float', 'date', 'boolean', 'category'],
+    'VALIDATION_MAPPINGS': {
+        'data_type': 'Type Match',
+        'range': 'Out of Range', 
+        'duplicate': 'Has Duplicates',
+        'null': 'Has Nulls',
+        'format': 'Has Format Issues'
+    }
+}
 
 
-# Current timestamp and user
-CURRENT_TIME = datetime.now()
-
-CURRENT_USER = "Ayaz"
-
-
-# ----- DATA MODELS (REPLACING PYDANTIC) -----
-
-# Constants for validation
-ALLOWED_CONSTRAINT_TYPES = ['min', 'max', 'regex', 'non-null', 'unique', 'enum']
-ALLOWED_DATA_TYPES = ['string', 'integer', 'float', 'date', 'boolean', 'category']
+# ----- SIMPLE DATA MODELS -----
 
 class ValidationRule:
-    """Class for validation rules (replacing Pydantic ValidationRule)"""
-    def __init__(self, column, data_type, actual_type=None, type_match=None, 
-                 type_conversion_needed=None, conversion_recommendation=None, 
-                 constraints=None, example_values=None):
+    """Simplified validation rule class"""
+    def __init__(self, column, data_type, constraints=None):
         self.column = column
-        
-        # Validate data_type
-        if data_type not in ALLOWED_DATA_TYPES:
-            raise ValueError(f"Data type must be one of {ALLOWED_DATA_TYPES}")
-        self.data_type = data_type
-        
-        self.actual_type = actual_type
-        self.type_match = type_match
-        self.type_conversion_needed = type_conversion_needed
-        self.conversion_recommendation = conversion_recommendation
+        self.data_type = data_type if data_type in CONFIG['ALLOWED_DATA_TYPES'] else 'string'
         self.constraints = constraints or []
-        self.example_values = example_values or []
 
 class ValidationRules:
-    """Class for all validation rules (replacing Pydantic ValidationRules)"""
+    """Container for validation rules"""
     def __init__(self, rules):
         self.rules = rules
-
-class FeatureAnalysis:
-    """Class for feature analysis results (replacing Pydantic FeatureAnalysis)"""
-    def __init__(self, name, dtype, total_count, null_count, unique_count, duplicate_count,
-                min_value=None, max_value=None, mean=None, median=None, std=None, top_values=None):
-        self.name = name
-        self.dtype = dtype
-        self.total_count = total_count
-        self.null_count = null_count
-        self.unique_count = unique_count
-        self.duplicate_count = duplicate_count
-        self.min_value = min_value
-        self.max_value = max_value
-        self.mean = mean
-        self.median = median
-        self.std = std
-        self.top_values = top_values
 
 # ----- DATA LOADING AND ANALYSIS FUNCTIONS -----
 
@@ -198,19 +152,14 @@ def parse_rules(llm_output):
                     continue
                     
                 # Validate data_type
-                if rule_data["data_type"] not in ALLOWED_DATA_TYPES:
+                if rule_data["data_type"] not in CONFIG['ALLOWED_DATA_TYPES']:
                     rule_data["data_type"] = "string"  # Default to string if invalid
                 
                 # Create ValidationRule object
                 rule = ValidationRule(
                     column=rule_data["column"],
                     data_type=rule_data["data_type"],
-                    actual_type=rule_data.get("actual_type"),
-                    type_match=rule_data.get("type_match"),
-                    type_conversion_needed=rule_data.get("type_conversion_needed"),
-                    conversion_recommendation=rule_data.get("conversion_recommendation"),
-                    constraints=rule_data.get("constraints", []),
-                    example_values=rule_data.get("example_values", [])
+                    constraints=rule_data.get("constraints", [])
                 )
                 rules.append(rule)
         
@@ -601,799 +550,101 @@ def analyze_feature_details(df: pd.DataFrame, feature: str):
         value_counts = df[feature].value_counts().head(5).to_dict()
         analysis['top_values'] = value_counts
     
-    return FeatureAnalysis(**analysis)
+    return analysis
 
 #---------------------------------------------------------------------------------------------------------------------------------------------
 
-def generate_datatype_summaries(schema):
-    """Generate AI summaries for data type analysis section"""
-    suggestion = generate_schema_suggestions(schema)
+def generate_ai_summary(schema, validation_reports, combined_report_df, validation_columns):
+    """Generate AI summary of validation results"""
+    total_checks = calculate_validation_metrics(validation_reports)['total_checks']
+    passed_checks = (combined_report_df[validation_columns] == '✅').sum().sum()
+    quality_score = (passed_checks / total_checks) * 100 if total_checks > 0 else 0
     
     prompt = f"""
-        As a data quality expert, analyze the data schema issues for this dataset by comparing the original schema: {schema} with the expected schema: {suggestion}. Highlight critical type mismatches that may affect analysis, provide summary for the results and discuss the potential data quality impact of these mismatches. Format your response in a professional, concise, and mature way, keeping it under 300 words, and generate the response in markdown and don't include markdown heading in the response.
+You are a data quality expert. Analyze these validation results:
+
+**Validation Reports**:
+- Data Type Issues: {len(validation_reports['data_type'])} columns tested
+- Range Issues: {len(validation_reports['range'])} columns tested  
+- Duplicates: {len(validation_reports['duplicate'])} columns tested
+- Nulls: {len(validation_reports['null'])} columns tested
+- Format Issues: {len(validation_reports['format'])} columns tested
+
+**Overall Stats**:
+- Quality Score: {quality_score:.1f}%
+- {passed_checks} out of {total_checks} checks passed
+
+Please:
+1. Summarize what validation tests were performed
+2. Identify key problems found
+3. Recommend practical solutions
+
+Respond in markdown (no headings), professionally and concisely.
     """
     
-    response = model.generate_content(prompt)
-    return response.text
-
-
-def generate_metrics_summaries(filtered_df, total_checks, passed_checks, quality_score):
-    """Generate AI summaries for validation metrics section"""
-    prompt = f"""
-        As a data quality expert, analyze these data quality metrics for a dataset with a quality score of {quality_score:.1f}%, {passed_checks} out of {total_checks} validation checks passed, and {filtered_df.iloc[:, 1:-1].eq('❌').any(axis=1).sum()} columns with issues. Provide an overall data quality assessment, and summary of the results and discuss the potential business impact of these quality issues. Format your response in a professional, concise, and mature way, keeping it under 300 words, and generate the response in markdown and don't include markdown heading in the response.
-    """
-    
-    response = model.generate_content(prompt)
-    return response.text
-
-
-def generate_nullvalue_summaries(null_value_data):
-    """Generate AI summaries for null value analysis section"""
-    prompt = f"""
-        As a data quality expert, analyze the null value distribution for this dataset: {null_value_data}. Identify columns with concerning null percentages, provide summary of the results, and discuss the potential impact on data analysis quality. Format your response in a professional, concise, and mature way, keeping it under 300 words, generate the response in markdown and don't include markdown heading in the response.
-    """
-    
-    response = model.generate_content(prompt)
-    return response.text
-
-def generate_executive_summary(df, filtered_df, total_checks, passed_checks, quality_score):
-    """Generate an AI-written executive summary based on dataset statistics."""
-    
-    # Calculate key metrics
-    total_rows = len(df)
-    total_columns = len(df.columns)
-    missing_values = df.isnull().sum().sum()
-    duplicate_rows = df.duplicated().sum()
-    
-    # Optional: Add more metrics if needed
-    null_percentage = round((missing_values / (total_rows * total_columns)) * 100, 2) if total_rows and total_columns else 0
-
-    prompt = f"""
-    You are a data quality expert. Write a professional, concise, and insightful executive summary for a dataset with the following characteristics:
-    
-    - Total Rows: {total_rows}
-    - Total Columns: {total_columns}
-    - Missing Values: {missing_values}
-    - Duplicate Rows: {duplicate_rows}
-    - Null Percentage: {null_percentage}%
-    
-    Also include the following key recommendations:
-    1. {filtered_df} 
-    2. {total_checks} 
-    3. {passed_checks}
-    4. {quality_score}
-    
-    The summary should be under 300 words, written in a confident and analytical tone, and suitable for inclusion in a formal data quality report.
-    The response should be in markown and don't include markdown heading in the response.
-    """
-
-    response = model.generate_content(prompt)
-    return response.text
-
-
-def generate_validation_insights(validation_data):
-    """Generate AI insights from validation_data used in the PDF report."""
-    # Skip header row
-    data_rows = validation_data[1:]
-
-    passed_columns = 0
-    failed_columns = 0
-    failed_details = []
-
-    for row in data_rows:
-        column_name = row[0]
-        status = row[1]
-        issues_paragraph = row[2]
-
-        if "❌" in status:
-            failed_columns += 1
-            # Extract plain text from Paragraph object
-            issue_text = issues_paragraph.getPlainText()
-            failed_details.append(f"{column_name}: {issue_text}")
-        else:
-            passed_columns += 1
-
-    failure_rate = (failed_columns / (passed_columns + failed_columns)) * 100 if (passed_columns + failed_columns) > 0 else 0
-    failed_columns_list = ", ".join(failed_details[:5]) + ("..." if len(failed_details) > 5 else "")
-
-    prompt = f"""
-    You are a data quality expert. Write a professional, concise, and insightful summary of the validation results for a dataset.
-
-    **Validation Overview**
-    - {passed_columns} columns passed all validation checks.
-    - {failed_columns} columns have issues that need attention.
-    - Approx. {failure_rate:.1f}% of the columns failed at least one check.
-    - Notable issues: {failed_columns_list}
-
-    Keep the summary under 300 words. Use a confident, analytical tone suitable for a formal data quality report.
-    The response should be in markdown format and don't include markdown heading in the response.
-    """
-
-    response = model.generate_content(prompt)
-    return response.text
-
-
-
-def generate_data_improvement_recommendations(
-    df,
-    schema,
-    null_value_data,
-    validation_data,
-    total_checks,
-    passed_checks,
-    quality_score
-):
-    """Generate a final AI summary with improvement recommendations and next steps."""
-
-    # Extract key metrics
-    total_rows = len(df)
-    total_columns = len(df.columns)
-    missing_values = df.isnull().sum().sum()
-    duplicate_rows = df.duplicated().sum()
-    null_percentage = round((missing_values / (total_rows * total_columns)) * 100, 2) if total_rows and total_columns else 0
-
-    # Count validation results
-    data_rows = validation_data[1:]
-    passed_columns = sum(1 for row in data_rows if "✅" in row[1])
-    failed_columns = sum(1 for row in data_rows if "❌" in row[1])
-
-    prompt = f"""
-    You are a senior data quality consultant. Based on the following dataset profile, write a final summary that includes a holistic assessment, key findings, improvement recommendations, and next steps. The tone should be confident, professional, and forward-looking.
-
-    **Dataset Overview**
-    - Total Rows: {total_rows}
-    - Total Columns: {total_columns}
-    - Missing Values: {missing_values}
-    - Duplicate Rows: {duplicate_rows}
-    - Null Percentage: {null_percentage}%
-
-    **Schema Overview**
-    - Schema: {schema}
-
-    **Validation Summary**
-    - {passed_columns} columns passed all validation checks.
-    - {failed_columns} columns have issues.
-    - {passed_checks} out of {total_checks} validation checks passed.
-    - Overall Quality Score: {quality_score:.1f}%
-
-    **Null Value Insights**
-    - {null_value_data}
-
-    Provide:
-    - A brief summary of the dataset's current state.
-    - Key issues and their potential impact.
-    - Actionable recommendations for improving data quality.
-    - Suggested next steps for the data team.
-
-    Keep the summary under 500 words.
-    The response should be in markdown format and don't include markdown heading in the response.
-    """
-
-    response = model.generate_content(prompt)
-    return response.text
+    return model.generate_content(prompt).text
 
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-def create_modern_pdf_report(df, validation_report, validation_rules, current_time, username):
-    """Generate a modern PDF report with the required sections and embedded charts."""
-    # We'll use reportlab to render a PDF
-    
-    output = io.BytesIO()
-    doc = SimpleDocTemplate(
-        output,
-        pagesize=letter,
-        rightMargin=0.5*inch,
-        leftMargin=0.5*inch,
-        topMargin=0.5*inch,
-        bottomMargin=0.5*inch
-    )
-    
-    # Create styles
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=24,
-        spaceAfter=30,
-        alignment=1,
-        textColor=colors.HexColor('#1A5276')
-    )
-    heading_style = ParagraphStyle(
-        'CustomHeading',
-        parent=styles['Heading2'],
-        fontSize=16,
-        spaceBefore=20,
-        spaceAfter=10,
-        textColor=colors.HexColor('#2874A6')
-    )
-    subheading_style = ParagraphStyle(
-        'CustomSubHeading',
-        parent=styles['Heading3'],
-        fontSize=14,
-        spaceBefore=15,
-        spaceAfter=8,
-        textColor=colors.HexColor('#2E86C1')
-    )
-    normal_style = ParagraphStyle(
-        'CustomNormal',
-        parent=styles['Normal'],
-        fontSize=11,
-        spaceBefore=6,
-        spaceAfter=6
-    )
-    insight_style = ParagraphStyle(
-        'InsightStyle',
-        parent=styles['Normal'],
-        fontSize=11,
-        spaceBefore=10,
-        spaceAfter=10,
-        leftIndent=20,
-        rightIndent=20,
-        borderColor=colors.HexColor('#AED6F1'),
-        borderWidth=1,
-        borderPadding=10,
-        borderRadius=5
-    )
-    
-    # Enhanced styles for AI insights
-    insight_title_style = ParagraphStyle(
-        'InsightTitleStyle',
-        parent=styles['Heading3'],
-        fontSize=14,
-        spaceBefore=10,
-        spaceAfter=5,
-        textColor=colors.HexColor('#1A5276'),
-        borderColor=colors.HexColor('#AED6F1'),
-        borderWidth=0,
-        borderPadding=0,
-    )
-    
-    insight_bullet_style = ParagraphStyle(
-        'InsightBulletStyle',
-        parent=styles['Normal'],
-        fontSize=11,
-        spaceBefore=3,
-        spaceAfter=3,
-        leftIndent=30,
-        firstLineIndent=-15,
-        bulletIndent=15,
-        bulletFontName='Symbol',
-    )
-    
-    # Build document elements
-    elements = []
-    
-    # Title
-    elements.append(Paragraph("Data Validation Report", title_style))
-    elements.append(Spacer(1, 20))
-    
-    # Metadata
-    metadata = [
-        ["Report Generated:", current_time],
-        ["Generated By:", username],
-        ["Total Records:", str(len(df))],
-        ["Total Columns:", str(len(df.columns))]
-    ]
-    
-    table = Table(metadata, colWidths=[2*inch, 4*inch])
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#D4E6F1')),
-        ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 0), (-1, -1), 11),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
-        ('TOPPADDING', (0, 0), (-1, -1), 12),
-        ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#AED6F1'))
-    ]))
-    elements.append(table)
-    elements.append(Spacer(1, 20))
 
-    # 1. Executive Summary (SECTION 1)
-    elements.append(Paragraph("1. Executive Summary", heading_style))
+def calculate_validation_metrics(validation_reports):
+    """Calculate total and passed checks for all validation types consistently"""
+    metrics = {'total_checks': 0, 'passed_checks': 0, 'type_details': {}}
     
-    # Calculate quality score using the new validation report format
-    validation_columns = ['Type Valid', 'Range Valid', 'No Duplicates', 'Non-Null', 'Format Valid']
-    total_checks = len(validation_columns) * len(validation_report)
-    passed_checks = (validation_report[validation_columns] == '✅').sum().sum()
-    quality_score = (passed_checks / total_checks) * 100 if total_checks > 0 else 0
-    
-    # Generate the summary using AI
-    exec_summary_text = generate_executive_summary(df, validation_report, total_checks, passed_checks, quality_score)
-
-    # Parse and format AI insights
-    elements.append(Spacer(1, 10))
-    elements.append(Paragraph("AI Insights - Executive Summary", insight_title_style))
-    
-    # Convert markdown to properly formatted bullets
-    insight_elements = format_markdown_to_bullets(exec_summary_text, insight_bullet_style)
-    elements.extend(insight_elements)
-    
-    # Add page break after executive summary
-    elements.append(PageBreak())
-
-    # 2. Data Preview Section (SECTION 2)
-    elements.append(Paragraph("2. Data Preview", heading_style))
-    
-    # Data preview
-    preview_data = [["Column", "Type", "Non-Null Count", "Sample Values"]]
-    for col in df.columns:
-        non_null_count = df[col].count()
-        sample_vals = str(df[col].dropna().head(3).tolist())[:50] + "..."
-        preview_data.append([
-            col,
-            str(df[col].dtype),
-            f"{non_null_count} / {len(df)}",
-            Paragraph(
-                sample_vals,
-                ParagraphStyle(
-                    'SampleValueStyle',
-                    fontSize=9,
-                    fontName='Helvetica',
-                    leading=12
-                )
-            )
-        ])
-
-    preview_table = Table(
-        preview_data, 
-        colWidths=[1.5*inch, inch, 1.5*inch, 3*inch],
-        rowHeights=[0.4*inch] + [None] * (len(preview_data)-1)  # First row fixed, others auto
-    )
-
-    preview_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2874A6')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 11),
-        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), 11),
-        ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#AED6F1')),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.HexColor('#EBF5FB')]),
-        
-        # Add these new styles for text wrapping
-        ('LEFTPADDING', (0, 0), (-1, -1), 6),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('WORDWRAP', (0, 0), (-1, -1), True)
-    ]))
-    elements.append(preview_table)
-    
-    # Add page break after data preview
-    elements.append(PageBreak())
-    
-    # 3. Data Type Analysis Section (SECTION 3)
-    elements.append(Paragraph("3. Data Type Analysis", heading_style))
-    
-    # Parse rules to display type comparison
-    try:
-        if hasattr(validation_rules, 'rules'):
-            type_data = [["Column", "Expected Type", "Actual Type", "Type Match"]]
+    for report_key, status_column in CONFIG['VALIDATION_MAPPINGS'].items():
+        if report_key in validation_reports:
+            df = validation_reports[report_key]
+            total = len(df)
+            passed = len(df[df[status_column] == '✅']) if total > 0 else 0
             
-            for rule in validation_rules.rules:
-                # Only include rules for columns that exist in the dataframe to remove empty rows
-                if rule.column in df.columns and hasattr(rule, 'actual_type') and hasattr(rule, 'type_match'):
-                    type_data.append([
-                        rule.column,
-                        rule.data_type,
-                        getattr(rule, 'actual_type', 'Unknown'),
-                        "✅" if getattr(rule, 'type_match', False) else "❌"
-                    ])
-            
-            if len(type_data) > 1:  # If we have data
-                type_table = Table(type_data, colWidths=[1.8*inch, 1.7*inch, 1.7*inch, 1.8*inch])
-                type_table.setStyle(TableStyle([
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2874A6')),
-                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                    ('FONTSIZE', (0, 0), (-1, 0), 10),
-                    ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-                    ('FONTSIZE', (0, 1), (-1, -1), 11),
-                    ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#AED6F1')),
-                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.HexColor('#EBF5FB')])
-                ]))
-                
-                # Add colors for match column
-                for i in range(1, len(type_data)):
-                    if type_data[i][3] == "✅":
-                        type_table.setStyle(TableStyle([
-                            ('TEXTCOLOR', (3, i), (3, i), colors.green)
-                        ]))
-                    else:
-                        type_table.setStyle(TableStyle([
-                            ('TEXTCOLOR', (3, i), (3, i), colors.red)
-                        ]))
-                
-                elements.append(type_table)
-                
-                # Generate AI insights for data types
-                schema = {rule.column: rule.data_type for rule in validation_rules.rules if rule.column in df.columns}
-                datatype_insights = generate_datatype_summaries(schema)
+            metrics['total_checks'] += total
+            metrics['passed_checks'] += passed
+            metrics['type_details'][report_key] = {
+                'total': total, 'passed': passed,
+                'pass_rate': (passed / total * 100) if total > 0 else 0
+            }
+    return metrics
 
-                # Format AI insights into bulletpoints
-                elements.append(Spacer(1, 10))
-                elements.append(Paragraph("AI Insights - Data Type Analysis", insight_title_style))
-                
-                insight_elements = format_markdown_to_bullets(datatype_insights, insight_bullet_style)
-                elements.extend(insight_elements)
+def calculate_actual_total_checks(validation_reports, combined_report_df):
+    """Calculate actual number of applicable validation checks"""
+    return calculate_validation_metrics(validation_reports)['total_checks']
 
-            else:
-                elements.append(Paragraph("No data type analysis available.", normal_style))
-        else:
-            elements.append(Paragraph("No data type analysis available.", normal_style))
-    except Exception as e:
-        elements.append(Paragraph(f"Error displaying data type analysis: {str(e)}", normal_style))
+def create_donut_chart(passed, failed, percentage):
+    """Create a standardized donut chart for validation metrics"""
+    fig = go.Figure(data=[go.Pie(
+        labels=['Pass', 'Fail'],
+        values=[passed, failed],
+        hole=.6,
+        marker_colors=['#28a745', '#dc3545']
+    )])
     
-    # Add page break after data type analysis
-    elements.append(PageBreak())
-    
-    # 4. Null Value Distribution Section (SECTION 4)
-    elements.append(Paragraph("4. Null Value Distribution", heading_style))
-    
-    # Create null values table
-    null_data = [["Column", "Null Count", "Null Percentage", "Status"]]
-    
-    for col in df.columns:
-        null_count = df[col].isnull().sum()
-        null_percent = (null_count / len(df)) * 100
-        
-        if null_percent > 20:
-            status = "High"
-        elif null_percent > 5:
-            status = "Medium"
-        else:
-            status = "Low"
-        
-        null_data.append([
-            col,
-            str(null_count),
-            f"{null_percent:.2f}%",
-            status
-        ])
-    
-    null_table = Table(null_data, colWidths=[2*inch, 1.5*inch, 1.5*inch, 2*inch])
-    null_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2874A6')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 10),
-        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), 11),
-        ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#AED6F1')),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.HexColor('#EBF5FB')])
-    ]))
-    
-    # Add colors for status column
-    for i in range(1, len(null_data)):
-        status = null_data[i][3]
-        if status == "Low":
-            null_table.setStyle(TableStyle([
-                ('TEXTCOLOR', (3, i), (3, i), colors.green)
-            ]))
-        elif status == "Medium":
-            null_table.setStyle(TableStyle([
-                ('TEXTCOLOR', (3, i), (3, i), colors.orange)
-            ]))
-        elif status == "High":
-            null_table.setStyle(TableStyle([
-                ('TEXTCOLOR', (3, i), (3, i), colors.red)
-            ]))
-    
-    elements.append(null_table)
-
-    # Generate AI insights for null values
-    null_value_insights = generate_nullvalue_summaries(null_data[1:]) # Exclude header row
-
-    # Format AI insights into bulletpoints
-    elements.append(Spacer(1, 10))
-    elements.append(Paragraph("AI Insights - Null Value Analysis", insight_title_style))
-    
-    insight_elements = format_markdown_to_bullets(null_value_insights, insight_bullet_style)
-    elements.extend(insight_elements)
-    
-    # Add page break after null value analysis
-    elements.append(PageBreak())
-    
-    # 5. Validation Results Section (SECTION 5)
-    elements.append(Paragraph("5. Validation Results", heading_style))
-    validation_data = [[
-        "Column", 
-        "Type Valid",
-        "Range Valid",
-        "No Duplicates",
-        "Non-Null",
-        "Format Valid",
-        "Issues"
-    ]]
-
-    for _, row in validation_report.iterrows():
-        column_name = row['Column Name']
-        
-        if column_name in df.columns:
-            validation_data.append([
-                column_name,
-                row['Type Valid'],
-                row['Range Valid'],
-                row['No Duplicates'],
-                row['Non-Null'],
-                row['Format Valid'],
-                Paragraph(
-                    row['Details'] if row['Details'] else "N/A",
-                    ParagraphStyle(
-                        'IssuesStyle',
-                        fontSize=9,
-                        fontName='Helvetica',
-                        leading=12
-                    )
-                )
-            ])
-
-    validation_table = Table(
-        validation_data, 
-        colWidths=[1.2*inch, 0.8*inch, 0.8*inch, 0.8*inch, 0.8*inch, 0.8*inch, 1.8*inch],
-        rowHeights=[0.4*inch] + [None] * (len(validation_data)-1)  # First row fixed, others auto
+    fig.update_layout(
+        annotations=[dict(text=f'{percentage:.1f}%', x=0.5, y=0.5, font_size=20, showarrow=False)],
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+        margin=dict(t=0, l=0, r=0, b=0),
+        height=200
     )
+    return fig
 
-    validation_table.setStyle(TableStyle([
-        # Keep your existing styles
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2874A6')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 10),
-        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), 9),
-        ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#AED6F1')),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.HexColor('#EBF5FB')]),
-        
-        # Add these new styles for text wrapping
-        ('LEFTPADDING', (0, 0), (-1, -1), 6),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('WORDWRAP', (0, 0), (-1, -1), True)
-    ]))
-
-    # Add colors for validation status columns
-    for i in range(1, len(validation_data)):
-        for col_idx in range(1, 6):  # Columns 1-5 are validation result columns
-            if isinstance(validation_data[i][col_idx], str):
-                status = validation_data[i][col_idx]
-                if "✅" in status:
-                    validation_table.setStyle(TableStyle([
-                        ('TEXTCOLOR', (col_idx, i), (col_idx, i), colors.green)
-                    ]))
-                elif "❌" in status:
-                    validation_table.setStyle(TableStyle([
-                        ('TEXTCOLOR', (col_idx, i), (col_idx, i), colors.red)
-                    ]))
-    
-    elements.append(validation_table)
-    
-    # Generate validation insights
-    validation_insights = generate_validation_insights(validation_data)
-    
-    # Format AI insights into bulletpoints
-    elements.append(Spacer(1, 10))
-    elements.append(Paragraph("AI Insights - Validation Results", insight_title_style))
-    
-    insight_elements = format_markdown_to_bullets(validation_insights, insight_bullet_style)
-    elements.extend(insight_elements)
-    
-    # Add page break after validation results
-    elements.append(PageBreak())
-    
-    # 6. Data Validation Metrics (SECTION 6)
-    elements.append(Paragraph("6. Data Validation Metrics", heading_style))
-    
-    # Create metrics table
-    metrics_data = [
-        ["Metric", "Value"],
-        ["Overall Quality Score", f"{quality_score:.1f}%"],
-        ["Checks Passed", f"{passed_checks}/{total_checks}"],
-        ["Columns with Issues", str((validation_report[validation_columns] == '❌').any(axis=1).sum())],
-        ["Completeness", f"{100 - (df.isnull().sum().sum() / (len(df) * len(df.columns)) * 100):.1f}%"],
-        ["Duplicate Rows", f"{df.duplicated().sum()} ({df.duplicated().sum() / len(df) * 100:.1f}%)"]
-    ]
-    
-    metrics_table = Table(metrics_data, colWidths=[3*inch, 4*inch])
-    metrics_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2874A6')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 10),
-        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), 9),
-        ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#AED6F1')),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.HexColor('#EBF5FB')])
-    ]))
-    
-    elements.append(metrics_table)
-    
-    # Generate AI insights for metrics
-    metrics_insights = generate_metrics_summaries(validation_report, total_checks, passed_checks, quality_score)
-
-    # Format AI insights into bulletpoints
-    elements.append(Spacer(1, 10))
-    elements.append(Paragraph("AI Insights - Data Quality Metrics", insight_title_style))
-    
-    insight_elements = format_markdown_to_bullets(metrics_insights, insight_bullet_style)
-    elements.extend(insight_elements)
-    
-    # Add page break after metrics
-    elements.append(PageBreak())
-    
-    # 7. Recommendations (NEW SECTION 7)
-    elements.append(Paragraph("7. Data Improvement Recommendations", heading_style))
-    
-    # Generate AI recommendations
-    recommendations = generate_data_improvement_recommendations(
-        df=df,
-        schema=schema,
-        null_value_data=null_value_insights,
-        validation_data=validation_data,
-        total_checks=total_checks,
-        passed_checks=passed_checks,
-        quality_score=quality_score
-    )
-    
-    # Format AI recommendations into bulletpoints
-    elements.append(Spacer(1, 10))
-    elements.append(Paragraph("AI Insights - Recommendations for Data Improvement", insight_title_style))
-    
-    recommendation_elements = format_markdown_to_bullets(recommendations, insight_bullet_style)
-    elements.extend(recommendation_elements)
-    
-    doc.build(elements)
-    
-    return output
-
-
-def format_markdown_to_bullets(markdown_text, bullet_style):
-    """
-    Converts markdown text into ReportLab bullet elements.
-    
-    Args:
-        markdown_text (str): Markdown formatted text
-        bullet_style (ParagraphStyle): The style to apply to bullet points
-        
-    Returns:
-        list: List of Paragraph elements with bullet formatting
-    """
-    elements = []
-    
-    # Process the markdown text to extract sections
-    sections = []
-    current_section = {"title": None, "points": []}
-    
-    for line in markdown_text.split('\n'):
-        line = line.strip()
-        
-        # Skip empty lines
-        if not line:
-            continue
-            
-        # Check if line is a heading (starts with # or has ** at beginning and end)
-        if line.startswith('# ') or line.startswith('## ') or line.startswith('### '):
-            # If we already have a section, add it to sections
-            if current_section["points"]:
-                sections.append(current_section)
-                current_section = {"title": None, "points": []}
-            
-            # Set new section title
-            current_section["title"] = line.lstrip('#').strip()
-        
-        # Check if line is a bold text (likely a section title)
-        elif line.startswith('**') and line.endswith('**'):
-            # If we already have a section, add it to sections
-            if current_section["points"]:
-                sections.append(current_section)
-                current_section = {"title": None, "points": []}
-            
-            # Set new section title
-            current_section["title"] = line.strip('*').strip()
-        
-        # Check if line is a bullet point
-        elif line.startswith('- ') or line.startswith('* '):
-            current_section["points"].append(line[2:].strip())
-        
-        # Otherwise treat as regular text, could be a continuation of previous bullet
-        elif current_section["points"]:
-            # Append to last bullet point
-            current_section["points"][-1] += " " + line
-        else:
-            # Start a new bullet point
-            current_section["points"].append(line)
-    
-    # Add the last section if it has content
-    if current_section["points"]:
-        sections.append(current_section)
-    
-    # Now build the elements
-    for section in sections:
-        if section["title"]:
-            # Create section title with bold styling
-            section_title_style = ParagraphStyle(
-                'SectionTitle',
-                parent=bullet_style,
-                fontName='Helvetica-Bold',
-                fontSize=14,
-                spaceBefore=6,
-                spaceAfter=3,
-                leftIndent=10,
-            )
-            elements.append(Paragraph(section["title"], section_title_style))
-        
-        # Add bullet points
-        for point in section["points"]:
-            point = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', point)
-
-            elements.append(Paragraph(f"• {point}", bullet_style))
-    
-    return elements
-
-
-def generate_validation_summary(schema, validation_reports, combined_report_df, validation_columns):
-    """Generate AI summary of validation logic, issues found, and remedies based on the dashboard's results."""
-    
-    # Extract key metrics
-    total_rows = combined_report_df.shape[0]
-    total_columns = combined_report_df.shape[1]
-    failed_columns = (combined_report_df == '❌').any(axis=1).sum()
-    # passed_checks = (combined_report_df == '✅').sum().sum()
-    # total_checks = combined_report_df.size
-    # quality_score = (passed_checks / total_checks) * 100 if total_checks > 0 else 0
-    # print(quality_score)
-    total_checks = len(validation_columns) * len(combined_report_df)
-    passed_checks = (combined_report_df[validation_columns] == '✅').sum().sum()
-    quality_score = (passed_checks / total_checks) * 100 if total_checks > 0 else 0
-
-    # Build prompt
-    prompt = f"""
-You are a world best Data Scientist and Data Consultant Expert. Analyze the following validation results from a data quality assessment tool.
-
-**Schema Summary**: {schema}
-
-**Validation Reports**:
-- Data Type Issues: {validation_reports['data_type'].to_dict(orient='records')}
-- Range Issues: {validation_reports['range'].to_dict(orient='records')}
-- Duplicates: {validation_reports['duplicate'].to_dict(orient='records')}
-- Nulls: {validation_reports['null'].to_dict(orient='records')}
-- Format Issues: {validation_reports['format'].to_dict(orient='records')}
-
-**Overall Stats**:
-- Total Rows: {total_rows}
-- Total Columns: {total_columns}
-- Columns with Issues: {failed_columns}
-- Quality Score: {quality_score:.1f}%
-
-Please:
-1. Summarize what validation tests were performed to analyze the data.
-2. Identify the types of problems found in the dataset.
-3. Recommend practical solutions for each issue.
-
-Respond in markdown (no headings), in a professional and concise tone.
-    """
-
-    response = model.generate_content(prompt)
-    return response.text
+def apply_custom_css():
+    """Apply custom CSS styling to the Streamlit app"""
+    st.markdown("""
+    <style>
+    .main .block-container {padding-top: 2rem;}
+    h1, h2, h3 {color: #1E88E5;}
+    .stTabs [data-baseweb="tab-list"] {gap: 2px; background-color: #f0f2f6; border-radius: 4px;}
+    .stTabs [data-baseweb="tab"] {padding: 10px 20px; border-radius: 4px 4px 0 0; background-color: #f0f2f6;}
+    .stTabs [aria-selected="true"] {background-color: #1E88E5 !important; color: white !important;}
+    .stDataFrame {border-radius: 8px; overflow: hidden;}
+    [data-testid="stMetricValue"] {font-size: 1.8rem !important; color: #1E88E5 !important; font-weight: bold !important;}
+    </style>
+    """, unsafe_allow_html=True)
 
 
 def main():
-    """
-    Main function for the Data Validation Check App.
-    Handles data loading, visualization, validation reporting, and PDF generation.
-    """
-    # Set current date and time dynamically
+    """Main function for the Data Quality Assessment App"""
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    username = CURRENT_USER  # This could be retrieved from a login system in a production app
     
     # Configure the Streamlit page
     st.set_page_config(
@@ -1402,43 +653,8 @@ def main():
         initial_sidebar_state="expanded"
     )
     
-    # Custom CSS for a more modern look
-    st.markdown("""
-    <style>
-    .main .block-container {padding-top: 2rem;}
-    h1, h2, h3 {color: #1E88E5;}
-    .stTabs [data-baseweb="tab-list"] {gap: 2px; background-color: #f0f2f6; border-radius: 4px;}
-    .stTabs [data-baseweb="tab"] {padding: 10px 20px; border-radius: 4px 4px 0 0; background-color: #f0f2f6;}
-    .stTabs [aria-selected="true"] {background-color: #1E88E5 !important; color: white !important;}
-    .css-6qob1r {font-family: 'Segoe UI', sans-serif;}
-    .css-1v0mbdj {border-radius: 5px;}
-    .stDataFrame {border-radius: 8px; overflow: hidden;}
-    .stMetric {
-        background-color: #f0f2f6;
-        padding: 15px;
-        border-radius: 5px;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
-        margin-bottom: 10px;
-    }
-    .stMetric:hover {
-        background-color: #e8eaed;
-    }
-    /* Header styling for column names */
-    h4 {
-        color: #0e1117;
-        margin-bottom: 10px;
-        border-bottom: 2px solid #e6e6e6;
-        padding-bottom: 5px;
-    }
-    /* Metric label colors */
-    [data-testid="stMetricLabel"] {
-        color: #666;
-    }
-    /* More modern metric styling */
-    [data-testid="stMetricValue"] {font-size: 1.8rem !important; color: #1E88E5 !important; font-weight: bold !important;}
-    [data-testid="stMetricLabel"] {font-size: 0.8rem !important; text-transform: uppercase !important; color: #555555 !important;}
-    </style>
-    """, unsafe_allow_html=True)
+    # Apply custom styling
+    apply_custom_css()
     
     # Create sidebar
     with st.sidebar:
@@ -1451,7 +667,7 @@ def main():
         st.sidebar.markdown("---")
         st.sidebar.markdown("### User Info")
         st.sidebar.markdown(f"**Time:** {current_time}")
-        st.sidebar.markdown(f"**User:** {CURRENT_USER}")
+        st.sidebar.markdown(f"**User:** {CONFIG['CURRENT_USER']}")
     
     # Main container
     st.title("📈 Data Quality Assessment Application")
@@ -1533,10 +749,12 @@ def main():
                     #st.subheader("Validation Summary")
                     
                     if not combined_report_df.empty:
-                        # Calculate overall quality score
+                        # Calculate overall quality score using unified function
                         validation_columns = ['Type Valid', 'Range Valid', 'No Duplicates', 'Non-Null', 'Format Valid']
-                        total_checks = len(validation_columns) * len(combined_report_df)
-                        passed_checks = (combined_report_df[validation_columns] == '✅').sum().sum()
+                        validation_metrics = calculate_validation_metrics(validation_reports)
+                        total_checks = validation_metrics['total_checks']
+                        passed_checks = validation_metrics['passed_checks']
+                        
                         quality_score = (passed_checks / total_checks) * 100 if total_checks > 0 else 0
                         columns_with_issues = (combined_report_df[validation_columns] == '❌').any(axis=1).sum()
                         
@@ -1551,7 +769,7 @@ def main():
                                 suggestions = generate_schema_suggestions(schema)
                                 validation_rules = parse_rules(suggestions)
                                 validation_reports, combined_report_df, validation_results = generate_validation_report(df, validation_rules)
-                                response = generate_validation_summary(schema, validation_reports, combined_report_df, validation_columns)
+                                response = generate_ai_summary(schema, validation_reports, combined_report_df, validation_columns)
                                 
                                 st.markdown(f"""
                                 <div style="height: 430px; overflow-y: auto; padding-right: 10px; margin-bottom: 20px;">
@@ -1569,23 +787,9 @@ def main():
                                 """, unsafe_allow_html=True)
 
                         with col_charts:
-                            # Create donut chart using plotly with increased height
-                            fig = go.Figure(data=[go.Pie(
-                                labels=['Pass', 'Fail'],
-                                values=[passed_checks, total_checks - passed_checks],
-                                hole=.6,
-                                marker_colors=['#28a745', '#dc3545']
-                            )])
-                            
-                            fig.update_layout(
-                                annotations=[dict(text=f'{quality_score:.1f}%', x=0.5, y=0.5, font_size=20, showarrow=False)],
-                                showlegend=True,
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-                                margin=dict(t=0, l=0, r=0, b=0),
-                                height=250  # Increased height from 150 to 250
-                            )
-                            
-                            st.plotly_chart(fig, use_container_width=True)
+                            # Create donut chart
+                            fig = create_donut_chart(passed_checks, total_checks - passed_checks, quality_score)
+                            st.plotly_chart(fig, use_container_width=True, key="summary_chart")
 
                             # Add spacing after pie chart
                             st.markdown("<div style='margin-bottom: 30px;'></div>", unsafe_allow_html=True)
@@ -1609,18 +813,37 @@ def main():
                         # Add spacing before validation type summaries
                         st.markdown("<div style='margin-top: 40px;'></div>", unsafe_allow_html=True)
 
-                        # Calculate and display validation type summaries in a grid below both columns
+                        # Calculate and display validation type summaries using unified metrics
                         validation_summaries = []
+                        validation_metrics = calculate_validation_metrics(validation_reports)
+                        
+                        # Map validation columns to their corresponding report keys
+                        validation_type_mapping = {
+                            'Type Valid': 'data_type',
+                            'Range Valid': 'range', 
+                            'No Duplicates': 'duplicate',
+                            'Non-Null': 'null',
+                            'Format Valid': 'format'
+                        }
+                        
                         for validation_type in validation_columns:
-                            passed = (combined_report_df[validation_type] == '✅').sum()
-                            total = len(combined_report_df)
-                            pass_rate = (passed / total) * 100
-                            validation_summaries.append({
-                                'type': validation_type,
-                                'passed': passed,
-                                'total': total,
-                                'rate': pass_rate
-                            })
+                            report_key = validation_type_mapping.get(validation_type)
+                            if report_key and report_key in validation_metrics['type_details']:
+                                details = validation_metrics['type_details'][report_key]
+                                validation_summaries.append({
+                                    'type': validation_type,
+                                    'passed': details['passed'],
+                                    'total': details['total'],
+                                    'rate': details['pass_rate']
+                                })
+                            else:
+                                # Fallback if report not found
+                                validation_summaries.append({
+                                    'type': validation_type,
+                                    'passed': 0,
+                                    'total': 0,
+                                    'rate': 0.0
+                                })
                         
                         # Display validation type summaries in a grid
                         for idx in range(0, len(validation_summaries), 3):
@@ -1666,23 +889,10 @@ def main():
                         # Progress visualization with Pie Chart
                         col1, col2 = st.columns([3, 2])
                         with col1:
-                            # Create donut chart using plotly
-                            fig = go.Figure(data=[go.Pie(
-                                labels=['Pass', 'Fail'],
-                                values=[matching_types, mismatched_types],
-                                hole=.6,
-                                marker_colors=['#28a745', '#dc3545']
-                            )])
-                            
-                            fig.update_layout(
-                                annotations=[dict(text=f'{match_percentage:.1f}%', x=0.5, y=0.5, font_size=20, showarrow=False)],
-                                showlegend=True,
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-                                margin=dict(t=0, l=0, r=0, b=0),
-                                height=200
-                            )
-                            
-                            st.plotly_chart(fig, use_container_width=True)
+                            # Create donut chart
+                            fig = create_donut_chart(matching_types, mismatched_types, match_percentage)
+                            fig.update_layout(height=200)
+                            st.plotly_chart(fig, use_container_width=True, key="datatype_chart")
 
                         with col2:
                             # Status boxes
@@ -1757,23 +967,10 @@ def main():
                         # Progress visualization with Pie Chart
                         col1, col2 = st.columns([3, 2])
                         with col1:
-                            # Create donut chart using plotly
-                            fig = go.Figure(data=[go.Pie(
-                                labels=['Within Range', 'Out of Range'],
-                                values=[in_range, out_range],
-                                hole=.6,
-                                marker_colors=['#28a745', '#dc3545']
-                            )])
-                            
-                            fig.update_layout(
-                                annotations=[dict(text=f'{in_range_percentage:.1f}%', x=0.5, y=0.5, font_size=20, showarrow=False)],
-                                showlegend=True,
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-                                margin=dict(t=0, l=0, r=0, b=0),
-                                height=200
-                            )
-                            
-                            st.plotly_chart(fig, use_container_width=True)
+                            # Create donut chart
+                            fig = create_donut_chart(in_range, out_range, in_range_percentage)
+                            fig.update_layout(height=200)
+                            st.plotly_chart(fig, use_container_width=True, key="range_chart")
 
                         with col2:
                             # Status boxes
@@ -1861,23 +1058,10 @@ def main():
                         # Progress visualization with Pie Chart
                         col1, col2 = st.columns([3, 2])
                         with col1:
-                            # Create donut chart using plotly
-                            fig = go.Figure(data=[go.Pie(
-                                labels=['Unique', 'Has Duplicates'],
-                                values=[unique_cols, duplicate_cols],
-                                hole=.6,
-                                marker_colors=['#28a745', '#dc3545']
-                            )])
-                            
-                            fig.update_layout(
-                                annotations=[dict(text=f'{unique_percentage:.1f}%', x=0.5, y=0.5, font_size=20, showarrow=False)],
-                                showlegend=True,
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-                                margin=dict(t=0, l=0, r=0, b=0),
-                                height=200
-                            )
-                            
-                            st.plotly_chart(fig, use_container_width=True)
+                            # Create donut chart
+                            fig = create_donut_chart(unique_cols, duplicate_cols, unique_percentage)
+                            fig.update_layout(height=200)
+                            st.plotly_chart(fig, use_container_width=True, key="duplicates_chart")
 
                         with col2:
                             # Status boxes
@@ -1961,23 +1145,10 @@ def main():
                         # Progress visualization with Pie Chart
                         col1, col2 = st.columns([3, 2])
                         with col1:
-                            # Create donut chart using plotly
-                            fig = go.Figure(data=[go.Pie(
-                                labels=['No Nulls', 'Has Nulls'],
-                                values=[no_nulls, has_nulls],
-                                hole=.6,
-                                marker_colors=['#28a745', '#dc3545']
-                            )])
-                            
-                            fig.update_layout(
-                                annotations=[dict(text=f'{no_nulls_percentage:.1f}%', x=0.5, y=0.5, font_size=20, showarrow=False)],
-                                showlegend=True,
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-                                margin=dict(t=0, l=0, r=0, b=0),
-                                height=200
-                            )
-                            
-                            st.plotly_chart(fig, use_container_width=True)
+                            # Create donut chart
+                            fig = create_donut_chart(no_nulls, has_nulls, no_nulls_percentage)
+                            fig.update_layout(height=200)
+                            st.plotly_chart(fig, use_container_width=True, key="nulls_chart")
 
                         with col2:
                             # Status boxes
@@ -2081,23 +1252,10 @@ def main():
                         # Progress visualization with Pie Chart
                         col1, col2 = st.columns([3, 2])
                         with col1:
-                            # Create donut chart using plotly
-                            fig = go.Figure(data=[go.Pie(
-                                labels=['Valid Format', 'Invalid Format'],
-                                values=[valid_format, invalid_format],
-                                hole=.6,
-                                marker_colors=['#28a745', '#dc3545']
-                            )])
-                            
-                            fig.update_layout(
-                                annotations=[dict(text=f'{valid_percentage:.1f}%', x=0.5, y=0.5, font_size=20, showarrow=False)],
-                                showlegend=True,
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-                                margin=dict(t=0, l=0, r=0, b=0),
-                                height=200
-                            )
-                            
-                            st.plotly_chart(fig, use_container_width=True)
+                            # Create donut chart
+                            fig = create_donut_chart(valid_format, invalid_format, valid_percentage)
+                            fig.update_layout(height=200)
+                            st.plotly_chart(fig, use_container_width=True, key="format_chart")
 
                         with col2:
                             # Status boxes
@@ -2169,35 +1327,6 @@ def main():
 
                     else:
                         st.info("No format validation rules available.")
-
-                # PDF Report section
-                #st.header("Generate Report")
-                
-                # if st.button("Download PDF Report", type="primary"):
-                #     with st.spinner("Generating comprehensive PDF report..."):
-                #         try:
-                #             # Create PDF in memory
-                #             pdf_output = create_modern_pdf_report(
-                #                 df, 
-                #                 combined_report_df,
-                #                 validation_rules,
-                #                 current_time, 
-                #                 CURRENT_USER
-                #             )
-                            
-                #             # Add download button with timestamp in filename
-                #             timestamp = datetime.strptime(current_time, "%Y-%m-%d %H:%M:%S")
-                #             st.download_button(
-                #                 label="📥 Download PDF Report",
-                #                 data=pdf_output.getvalue(),
-                #                 file_name=f"data_quality_report_{timestamp.strftime('%Y%m%d_%H%M%S')}.pdf",
-                #                 mime="application/pdf",
-                #             )
-                            
-                #             # Add generation info
-                #             st.success(f"PDF Report successfully generated")
-                #         except Exception as pdf_error:
-                #             st.error(f"Error generating PDF report: {str(pdf_error)}")
         
         except Exception as e:
             st.error(f"Error processing dataset: {str(e)}")
