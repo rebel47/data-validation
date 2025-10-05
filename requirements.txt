@@ -9,3 +9,4 @@ plotly
 numpy 
 markdown2 
 graphviz
+openpyxl
