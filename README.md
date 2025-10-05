@@ -172,14 +172,6 @@ Solution: Use CSV, JSON, or Excel (.xlsx, .xls) files only
 Solution: Consider chunking large datasets or increasing system memory
 ```
 
-## 📊 Screenshots
-
-*Add screenshots of your application here showing:*
-- Main dashboard
-- Validation results
-- PDF report sample
-- Charts and visualizations
-
 ## 🤝 Support
 
 - **Issues**: [GitHub Issues](https://github.com/rebel47/data-validation/issues)
